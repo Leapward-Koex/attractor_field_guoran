@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
+import 'src/guoran_app_routes.dart';
 import 'src/guoran_ble_controller.dart';
 import 'src/guoran_protocol.dart';
 
@@ -12,30 +13,43 @@ void main() {
   runApp(const GuoranApp());
 }
 
-class GuoranApp extends StatelessWidget {
+class GuoranApp extends StatefulWidget {
   const GuoranApp({super.key});
+
+  @override
+  State<GuoranApp> createState() => _GuoranAppState();
+}
+
+class _GuoranAppState extends State<GuoranApp> {
+  late final GuoranBleController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = GuoranBleController();
+    unawaited(_controller.initialize());
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     final ThemeData baseTheme = ThemeData(
       useMaterial3: true,
-      colorScheme: ColorScheme.fromSeed(
-        seedColor: const Color(0xFFE85A24),
-        brightness: Brightness.light,
-      ),
+      colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFFE85A24), brightness: Brightness.light),
       scaffoldBackgroundColor: const Color(0xFFF7F0E7),
     );
 
     return MaterialApp(
       title: 'Attractor Field Guoran',
       debugShowCheckedModeBanner: false,
-      theme: baseTheme.copyWith(
-        cardTheme: const CardThemeData(
-          elevation: 0,
-          margin: EdgeInsets.zero,
-        ),
-      ),
-      home: const GuoranHomePage(),
+      theme: baseTheme.copyWith(cardTheme: const CardThemeData(elevation: 0, margin: EdgeInsets.zero)),
+      initialRoute: GuoranRouteNames.discovery,
+      onGenerateRoute: (RouteSettings settings) => buildGuoranRoute(settings, _controller),
     );
   }
 }
@@ -94,22 +108,19 @@ class _GuoranHomePageState extends State<GuoranHomePage> {
                     const SizedBox(height: 16),
                     _buildServiceDiagnosticsCard(context),
                   ],
-                  if (_controller.debugLogLines.isNotEmpty) ...<Widget>[
-                    const SizedBox(height: 16),
-                    _buildDebugReportCard(context),
-                  ],
-                  if (_controller.connectedDevice != null) ...<Widget>[
-                    const SizedBox(height: 16),
-                    _buildConnectionCard(context),
-                  ],
-                  if (_controller.isConnected && !_controller.hasSnapshot) ...<Widget>[
+                  if (_controller.debugLogLines.isNotEmpty) ...<Widget>[const SizedBox(height: 16), _buildDebugReportCard(context)],
+                  if (_controller.connectedDevice != null) ...<Widget>[const SizedBox(height: 16), _buildConnectionCard(context)],
+                  if (_controller.isConnected && !_controller.hasSnapshot && !_controller.canSendTimeWithoutSnapshot) ...<Widget>[
                     const SizedBox(height: 16),
                     _buildHandshakeCard(context),
                   ],
-                  if (_controller.hasSnapshot) ...<Widget>[
+                  if (_controller.canSendTimeWithoutSnapshot && !_controller.hasSnapshot) ...<Widget>[
                     const SizedBox(height: 16),
-                    _buildTimeSection(context),
+                    _buildPendingSnapshotCard(context),
+                    const SizedBox(height: 16),
+                    _buildQuickTimeSyncCard(context),
                   ],
+                  if (_controller.hasSnapshot) ...<Widget>[const SizedBox(height: 16), _buildTimeSection(context)],
                 ],
               ),
             ),
@@ -139,20 +150,14 @@ class _GuoranHomePageState extends State<GuoranHomePage> {
               Container(
                 width: 48,
                 height: 48,
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.18),
-                  borderRadius: BorderRadius.circular(16),
-                ),
+                decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.18), borderRadius: BorderRadius.circular(16)),
                 child: const Icon(Icons.access_time_filled, color: Colors.white),
               ),
               const SizedBox(width: 14),
               Expanded(
                 child: Text(
                   'Attractor Field Guoran',
-                  style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w700,
-                      ),
+                  style: Theme.of(context).textTheme.headlineSmall?.copyWith(color: Colors.white, fontWeight: FontWeight.w700),
                 ),
               ),
             ],
@@ -160,19 +165,13 @@ class _GuoranHomePageState extends State<GuoranHomePage> {
           const SizedBox(height: 16),
           Text(
             'Port of the original DCloud clock app. Implemented so far: scan, connect, safety-key handshake, snapshot sync, and time settings.',
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: Colors.white.withValues(alpha: 0.92),
-                  height: 1.35,
-                ),
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Colors.white.withValues(alpha: 0.92), height: 1.35),
           ),
           const SizedBox(height: 16),
           Wrap(
             spacing: 10,
             runSpacing: 10,
-            children: <Widget>[
-              _buildPill('Adapter ${_adapterLabel(_controller.adapterState)}'),
-              _buildPill(_controller.statusMessage),
-            ],
+            children: <Widget>[_buildPill('Adapter ${_adapterLabel(_controller.adapterState)}'), _buildPill(_controller.statusMessage)],
           ),
         ],
       ),
@@ -182,10 +181,7 @@ class _GuoranHomePageState extends State<GuoranHomePage> {
   Widget _buildPill(String label) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.18),
-        borderRadius: BorderRadius.circular(999),
-      ),
+      decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.18), borderRadius: BorderRadius.circular(999)),
       child: Text(
         label,
         style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
@@ -206,10 +202,7 @@ class _GuoranHomePageState extends State<GuoranHomePage> {
           const Icon(Icons.error_outline, color: Color(0xFF9E3A22)),
           const SizedBox(width: 12),
           Expanded(
-            child: Text(
-              message,
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: const Color(0xFF7E2A19)),
-            ),
+            child: Text(message, style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: const Color(0xFF7E2A19))),
           ),
         ],
       ),
@@ -222,15 +215,9 @@ class _GuoranHomePageState extends State<GuoranHomePage> {
       title: 'Bluetooth',
       subtitle: 'Scan for nearby clocks that match the original app filters.',
       trailing: FilledButton.icon(
-        onPressed: _controller.isBusy
-            ? null
-            : (_controller.isScanning ? _controller.stopScan : _controller.startScan),
+        onPressed: _controller.isBusy ? null : (_controller.isScanning ? _controller.stopScan : _controller.startScan),
         icon: _controller.isScanning
-            ? const SizedBox(
-                width: 16,
-                height: 16,
-                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-              )
+            ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
             : const Icon(Icons.radar),
         label: Text(_controller.isScanning ? 'Stop' : 'Scan'),
       ),
@@ -253,9 +240,7 @@ class _GuoranHomePageState extends State<GuoranHomePage> {
           ? Padding(
               padding: const EdgeInsets.symmetric(vertical: 20),
               child: Text(
-                _controller.isScanning
-                    ? 'Scanning for devices...'
-                    : 'No matching devices yet. Start a scan to look for clocks.',
+                _controller.isScanning ? 'Scanning for devices...' : 'No matching devices yet. Start a scan to look for clocks.',
                 style: Theme.of(context).textTheme.bodyMedium,
               ),
             )
@@ -275,28 +260,20 @@ class _GuoranHomePageState extends State<GuoranHomePage> {
     final bool isSelected = connected != null && connected.remoteId == result.device.remoteId;
     final String name = result.device.platformName.trim().isNotEmpty
         ? result.device.platformName.trim()
-        : (result.advertisementData.advName.trim().isNotEmpty
-            ? result.advertisementData.advName.trim()
-            : result.device.remoteId.str);
+        : (result.advertisementData.advName.trim().isNotEmpty ? result.advertisementData.advName.trim() : result.device.remoteId.str);
 
     return ListTile(
       contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
       leading: CircleAvatar(
-        backgroundColor: isSelected
-            ? Theme.of(context).colorScheme.primary
-            : Theme.of(context).colorScheme.primaryContainer,
-        foregroundColor: isSelected
-            ? Colors.white
-            : Theme.of(context).colorScheme.onPrimaryContainer,
+        backgroundColor: isSelected ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.primaryContainer,
+        foregroundColor: isSelected ? Colors.white : Theme.of(context).colorScheme.onPrimaryContainer,
         child: const Icon(Icons.watch_later_outlined),
       ),
       title: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
       subtitle: Text('${result.device.remoteId.str}\nRSSI ${result.rssi} dBm'),
       isThreeLine: true,
       trailing: FilledButton(
-        onPressed: _controller.isBusy || !result.advertisementData.connectable
-            ? null
-            : () => _controller.connectToResult(result),
+        onPressed: _controller.isBusy || !result.advertisementData.connectable ? null : () => _controller.connectToResult(result),
         child: Text(isSelected ? 'Connected' : 'Connect'),
       ),
     );
@@ -329,10 +306,7 @@ class _GuoranHomePageState extends State<GuoranHomePage> {
         children: <Widget>[
           Text(device.platformName.isNotEmpty ? device.platformName : device.remoteId.str),
           const SizedBox(height: 6),
-          Text(
-            device.remoteId.str,
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
+          Text(device.remoteId.str, style: Theme.of(context).textTheme.bodySmall),
         ],
       ),
     );
@@ -342,7 +316,8 @@ class _GuoranHomePageState extends State<GuoranHomePage> {
     return _buildSectionCard(
       context: context,
       title: 'Discovered Services',
-      subtitle: 'Full GATT dump from the connected device. Use this to compare against the original app\'s expected FFE0 / FFE5 / FFF0 / FFC0 services.',
+      subtitle:
+          'Full GATT dump from the connected device. Use this to compare against the original app\'s expected FFE0 / FFE5 / FFF0 / FFC0 services.',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
@@ -357,10 +332,7 @@ class _GuoranHomePageState extends State<GuoranHomePage> {
               ),
               child: SelectableText(
                 _controller.serviceDiagnostics[index],
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      fontFamily: 'monospace',
-                      height: 1.45,
-                    ),
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(fontFamily: 'monospace', height: 1.45),
               ),
             ),
             if (index < _controller.serviceDiagnostics.length - 1) const SizedBox(height: 12),
@@ -407,10 +379,7 @@ class _GuoranHomePageState extends State<GuoranHomePage> {
             child: SingleChildScrollView(
               child: SelectableText(
                 _controller.debugReport,
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      fontFamily: 'monospace',
-                      height: 1.45,
-                    ),
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(fontFamily: 'monospace', height: 1.45),
               ),
             ),
           ),
@@ -426,14 +395,43 @@ class _GuoranHomePageState extends State<GuoranHomePage> {
       subtitle: 'Waiting for the same safety-key and OSC snapshot flow used by the DCloud app.',
       child: Row(
         children: <Widget>[
-          const SizedBox(
-            width: 20,
-            height: 20,
-            child: CircularProgressIndicator(strokeWidth: 2.4),
-          ),
+          const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.4)),
           const SizedBox(width: 12),
           Expanded(child: Text(_controller.statusMessage)),
         ],
+      ),
+    );
+  }
+
+  Widget _buildPendingSnapshotCard(BuildContext context) {
+    return _buildSectionCard(
+      context: context,
+      title: 'Snapshot Pending',
+      subtitle: 'The clock accepted the handshake, but the OSC state snapshot has not parsed yet.',
+      trailing: OutlinedButton.icon(
+        onPressed: _controller.isBusy ? null : _controller.refreshSnapshot,
+        icon: const Icon(Icons.sync),
+        label: const Text('Retry Snapshot'),
+      ),
+      child: Text(
+        'You can already send the current time while the app keeps trying to fetch the device state.',
+        style: Theme.of(context).textTheme.bodyMedium?.copyWith(height: 1.35),
+      ),
+    );
+  }
+
+  Widget _buildQuickTimeSyncCard(BuildContext context) {
+    return _buildSectionCard(
+      context: context,
+      title: 'Device Time Sync',
+      subtitle: 'Send the current time immediately even if the snapshot never finishes loading.',
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: FilledButton.tonalIcon(
+          onPressed: _controller.isBusy ? null : _controller.syncCurrentSystemTimeNow,
+          icon: const Icon(Icons.schedule_send),
+          label: const Text('Send current time now'),
+        ),
       ),
     );
   }
@@ -444,7 +442,7 @@ class _GuoranHomePageState extends State<GuoranHomePage> {
         _buildSectionCard(
           context: context,
           title: 'Device Time Sync',
-            subtitle: 'Matches the original app\'s S71/S70 toggle and \$ timestamp payload.',
+          subtitle: 'Matches the original app\'s S71/S70 toggle and \$ timestamp payload.',
           child: Column(
             children: <Widget>[
               SwitchListTile.adaptive(
@@ -614,22 +612,13 @@ class _GuoranHomePageState extends State<GuoranHomePage> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: <Widget>[
-                    Text(
-                      title,
-                      style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700),
-                    ),
+                    Text(title, style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700)),
                     const SizedBox(height: 4),
-                    Text(
-                      subtitle,
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(height: 1.35),
-                    ),
+                    Text(subtitle, style: Theme.of(context).textTheme.bodySmall?.copyWith(height: 1.35)),
                   ],
                 ),
               ),
-              if (trailing != null) ...<Widget>[
-                const SizedBox(width: 12),
-                trailing,
-              ],
+              if (trailing != null) ...<Widget>[const SizedBox(width: 12), trailing],
             ],
           ),
           const SizedBox(height: 16),
@@ -639,17 +628,9 @@ class _GuoranHomePageState extends State<GuoranHomePage> {
     );
   }
 
-  Future<void> _pickTime(
-    String title,
-    String currentValue,
-    Future<void> Function(TimeOfDay value) onConfirm,
-  ) async {
+  Future<void> _pickTime(String title, String currentValue, Future<void> Function(TimeOfDay value) onConfirm) async {
     final TimeOfDay initialTime = GuoranProtocol.parseTimeOfDay(currentValue);
-    final TimeOfDay? selected = await showTimePicker(
-      context: context,
-      helpText: title,
-      initialTime: initialTime,
-    );
+    final TimeOfDay? selected = await showTimePicker(context: context, helpText: title, initialTime: initialTime);
     if (selected == null || !context.mounted) {
       return;
     }
@@ -663,9 +644,7 @@ class _GuoranHomePageState extends State<GuoranHomePage> {
       return;
     }
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Debug report copied to clipboard.')),
-    );
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Debug report copied to clipboard.')));
   }
 
   String _adapterLabel(BluetoothAdapterState state) {

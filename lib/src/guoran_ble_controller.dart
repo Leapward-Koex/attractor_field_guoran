@@ -12,6 +12,9 @@ class GuoranBleController extends ChangeNotifier {
   GuoranBleController() {
     _adapterStateSubscription = FlutterBluePlus.adapterState.listen((state) {
       _adapterState = state;
+      if (state == BluetoothAdapterState.on) {
+        unawaited(_maybeStartAutomaticScan());
+      }
       notifyListeners();
     });
 
@@ -30,7 +33,10 @@ class GuoranBleController extends ChangeNotifier {
 
   static const _safetyKeyPreference = 'guoran_safety_key';
   static const Duration _connectSettleDelay = Duration(milliseconds: 350);
+  static const Duration _snapshotRequestThrottle = Duration(milliseconds: 800);
+  static const Duration _snapshotResponseTimeout = Duration(milliseconds: 1200);
   static const int _maxConnectFlowAttempts = 2;
+  static const int _maxSnapshotSyncAttempts = 3;
 
   BluetoothAdapterState _adapterState = BluetoothAdapterState.unknown;
   List<ScanResult> _scanResults = const <ScanResult>[];
@@ -58,6 +64,9 @@ class GuoranBleController extends ChangeNotifier {
   bool _safetyKeyAccepted = false;
   String _incomingSnapshotBuffer = '';
   DateTime? _lastSnapshotRequestAt;
+  Timer? _snapshotWatchdogTimer;
+  bool _snapshotSyncInProgress = false;
+  int _snapshotRequestAttempts = 0;
 
   GuoranSnapshot? _snapshot;
   bool _acquisitionSystemTimeEnabled = false;
@@ -71,6 +80,7 @@ class GuoranBleController extends ChangeNotifier {
   Timer? _systemTimeTimer;
   bool _connectFlowInProgress = false;
   bool _hasObservedConnectedState = false;
+  bool _shouldAutoScanWhenReady = true;
 
   late final StreamSubscription<BluetoothAdapterState> _adapterStateSubscription;
   late final StreamSubscription<List<ScanResult>> _scanResultsSubscription;
@@ -88,6 +98,8 @@ class GuoranBleController extends ChangeNotifier {
   BluetoothConnectionState get connectionState => _connectionState;
   bool get isConnected => _connectionState == BluetoothConnectionState.connected;
   bool get hasSnapshot => _snapshot != null;
+  bool get canSendTimeWithoutSnapshot => isConnected && _safetyKeyAccepted && _writeCharacteristic != null;
+  bool get isSnapshotPending => isConnected && !hasSnapshot;
   bool get acquisitionSystemTimeEnabled => _acquisitionSystemTimeEnabled;
   bool get alarm1Enabled => _alarm1Enabled;
   bool get alarm2Enabled => _alarm2Enabled;
@@ -109,6 +121,8 @@ class GuoranBleController extends ChangeNotifier {
       'safetyKeyAccepted: $_safetyKeyAccepted',
       'sentFallbackSafetyKey: $_sentFallbackSafetyKey',
       'snapshotPresent: ${_snapshot != null}',
+      'snapshotSyncInProgress: $_snapshotSyncInProgress',
+      'snapshotRequestAttempts: $_snapshotRequestAttempts',
       'incomingSnapshotBufferLength: ${_incomingSnapshotBuffer.length}',
       'lastSnapshotRequestAt: ${_lastSnapshotRequestAt?.toIso8601String() ?? '(none)'}',
       'readService: ${_readCharacteristic?.serviceUuid.str ?? '(unresolved)'}',
@@ -139,7 +153,81 @@ class GuoranBleController extends ChangeNotifier {
     _preferences = await SharedPreferences.getInstance();
     _storedSafetyKey = _preferences?.getString(_safetyKeyPreference);
     _log('Initialized controller. Cached safety key present: ${_storedSafetyKey != null}.');
+    unawaited(_maybeStartAutomaticScan());
     notifyListeners();
+  }
+
+  Future<void> saveDeviceTimeSettings({required bool useCurrentTime, required TimeOfDay manualTime}) async {
+    await _runSaveOperation(
+      progressMessage: 'Saving device time...',
+      action: () async {
+        final DateTime now = DateTime.now();
+        final DateTime selectedDateTime = useCurrentTime ? now : DateTime(now.year, now.month, now.day, manualTime.hour, manualTime.minute);
+
+        await _sendTimeToggleCommand(useCurrentTime ? GuoranProtocol.enableSystemTimeSync : GuoranProtocol.disableSystemTimeSync);
+        await _sendCommand(GuoranProtocol.buildSystemTimePayload(selectedDateTime));
+
+        _acquisitionSystemTimeEnabled = useCurrentTime;
+        if (useCurrentTime) {
+          _startSystemTimeUpdates();
+          _setStatus('Device time synced to the current time.', notify: false);
+        } else {
+          _stopSystemTimeUpdates();
+          _setStatus('Manual device time sent.', notify: false);
+        }
+
+        notifyListeners();
+      },
+    );
+  }
+
+  Future<void> saveAlarmSettings({required GuoranTimeField field, required bool enabled, required TimeOfDay time}) async {
+    await _runSaveOperation(
+      progressMessage: 'Saving ${_timeFieldLabel(field)}...',
+      action: () async {
+        await _sendTimeToggleCommand(_toggleCommandForAlarm(field, enabled));
+        if (enabled) {
+          await _sendCommand(GuoranProtocol.buildTimeCommand(field, time));
+        }
+
+        final String formattedTime = GuoranProtocol.formatTimeOfDay(time);
+        switch (field) {
+          case GuoranTimeField.alarm1:
+            _alarm1Enabled = enabled;
+            _alarm1 = formattedTime;
+            break;
+          case GuoranTimeField.alarm2:
+            _alarm2Enabled = enabled;
+            _alarm2 = formattedTime;
+            break;
+          case GuoranTimeField.boot:
+          case GuoranTimeField.off:
+            throw ArgumentError.value(field, 'field', 'Alarm settings only support alarm1 or alarm2.');
+        }
+
+        _setStatus('${_timeFieldLabel(field)} saved.', notify: false);
+        notifyListeners();
+      },
+    );
+  }
+
+  Future<void> saveScheduledPowerSettings({required bool enabled, required TimeOfDay bootTime, required TimeOfDay offTime}) async {
+    await _runSaveOperation(
+      progressMessage: 'Saving scheduled power...',
+      action: () async {
+        await _sendTimeToggleCommand(enabled ? GuoranProtocol.enableTiming : GuoranProtocol.disableTiming);
+        if (enabled) {
+          await _sendCommand(GuoranProtocol.buildTimeCommand(GuoranTimeField.boot, bootTime));
+          await _sendCommand(GuoranProtocol.buildTimeCommand(GuoranTimeField.off, offTime));
+        }
+
+        _timingEnabled = enabled;
+        _bootTime = GuoranProtocol.formatTimeOfDay(bootTime);
+        _offTime = GuoranProtocol.formatTimeOfDay(offTime);
+        _setStatus('Scheduled power saved.', notify: false);
+        notifyListeners();
+      },
+    );
   }
 
   void clearDebugLog() {
@@ -163,10 +251,7 @@ class GuoranBleController extends ChangeNotifier {
     _setStatus('Scanning for XGGF devices...');
 
     try {
-      await FlutterBluePlus.startScan(
-        timeout: const Duration(seconds: 15),
-        withServices: GuoranProtocol.scanServiceGuids,
-      );
+      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 15), withServices: GuoranProtocol.scanServiceGuids);
       _log('Scan started with service filters: ${GuoranProtocol.scanServices.join(', ')}.');
     } catch (error) {
       _setError('Unable to start scan: $error');
@@ -230,16 +315,14 @@ class GuoranBleController extends ChangeNotifier {
   Future<void> refreshSnapshot() async {
     _clearError();
     _log('Manual snapshot refresh requested.');
-    await _requestSnapshot(force: true);
+    await _startSnapshotSync();
   }
 
   Future<void> setAcquisitionSystemTimeEnabled(bool enabled) async {
     _acquisitionSystemTimeEnabled = enabled;
     notifyListeners();
 
-    await _sendTimeToggleCommand(
-      enabled ? GuoranProtocol.enableSystemTimeSync : GuoranProtocol.disableSystemTimeSync,
-    );
+    await _sendTimeToggleCommand(enabled ? GuoranProtocol.enableSystemTimeSync : GuoranProtocol.disableSystemTimeSync);
 
     if (enabled) {
       _startSystemTimeUpdates();
@@ -297,6 +380,7 @@ class GuoranBleController extends ChangeNotifier {
   @override
   void dispose() {
     _stopSystemTimeUpdates();
+    _cancelSnapshotWatchdog();
     _adapterStateSubscription.cancel();
     _scanResultsSubscription.cancel();
     _isScanningSubscription.cancel();
@@ -320,8 +404,7 @@ class GuoranBleController extends ChangeNotifier {
     _readCharacteristic = _requireCharacteristic(readService, GuoranProtocol.readCharacteristicShort);
     _writeCharacteristic = _requireCharacteristic(writeService, GuoranProtocol.writeCharacteristicShort);
     _safetyKeyCharacteristic = _requireCharacteristic(safetyKeyService, GuoranProtocol.safetyKeyCharacteristicShort);
-    _safetyKeyNotifyCharacteristic =
-        _requireCharacteristic(safetyKeyService, GuoranProtocol.safetyKeyNotifyCharacteristicShort);
+    _safetyKeyNotifyCharacteristic = _requireCharacteristic(safetyKeyService, GuoranProtocol.safetyKeyNotifyCharacteristicShort);
 
     _log(
       'Resolved transport: read=${readService.uuid.str}/${_readCharacteristic?.uuid.str}, '
@@ -388,10 +471,7 @@ class GuoranBleController extends ChangeNotifier {
   Future<void> _connectWithSettle(BluetoothDevice device) async {
     await device.connect(license: License.free, mtu: null);
     await _waitForConnectedState(device);
-    _log(
-      'BLE connect succeeded. Waiting ${_connectSettleDelay.inMilliseconds} ms for the link to settle before discovery.',
-      notify: false,
-    );
+    _log('BLE connect succeeded. Waiting ${_connectSettleDelay.inMilliseconds} ms for the link to settle before discovery.', notify: false);
     await Future<void>.delayed(_connectSettleDelay);
 
     if (device.isDisconnected || _connectionState == BluetoothConnectionState.disconnected) {
@@ -407,10 +487,7 @@ class GuoranBleController extends ChangeNotifier {
       return;
     }
 
-    await device.connectionState
-        .where((state) => state == BluetoothConnectionState.connected)
-        .first
-        .timeout(const Duration(seconds: 5));
+    await device.connectionState.where((state) => state == BluetoothConnectionState.connected).first.timeout(const Duration(seconds: 5));
   }
 
   bool _shouldRetryConnectFlow(Object error, int attempt, BluetoothDevice device) {
@@ -439,16 +516,15 @@ class GuoranBleController extends ChangeNotifier {
     await _readValueSubscription?.cancel();
     await _safetyKeyValueSubscription?.cancel();
 
-    _readValueSubscription = readCharacteristic.lastValueStream.listen(_handleReadValue);
-    _safetyKeyValueSubscription =
-        safetyKeyNotifyCharacteristic.lastValueStream.listen(_handleSafetyKeyValue);
+    _readValueSubscription = readCharacteristic.onValueReceived.listen(_handleReadValue);
+    _safetyKeyValueSubscription = safetyKeyNotifyCharacteristic.onValueReceived.listen(_handleSafetyKeyValue);
 
     _log('Enabling notifications on ${safetyKeyNotifyCharacteristic.uuid.str} and ${readCharacteristic.uuid.str}.', notify: false);
     await safetyKeyNotifyCharacteristic.setNotifyValue(true);
     await readCharacteristic.setNotifyValue(true);
 
     _setStatus('Performing device handshake...');
-    _incomingSnapshotBuffer = '';
+    _resetSnapshotSyncState(clearBuffer: true);
     _sentFallbackSafetyKey = false;
     _safetyKeyAccepted = false;
 
@@ -494,9 +570,11 @@ class GuoranBleController extends ChangeNotifier {
       _log('Trimmed snapshot buffer to ${_incomingSnapshotBuffer.length} characters.', notify: false);
     }
 
-    if (_safetyKeyAccepted) {
+    if (_safetyKeyAccepted && _snapshotSyncInProgress && _snapshotRequestAttempts < _maxSnapshotSyncAttempts) {
       _log('Handshake succeeded but snapshot is incomplete. Requesting OSC again.', notify: false);
       unawaited(_requestSnapshot());
+    } else if (_safetyKeyAccepted && _snapshotSyncInProgress) {
+      _log('Snapshot data is still incomplete, but automatic OSC retries are exhausted.', notify: false);
     }
   }
 
@@ -516,7 +594,7 @@ class GuoranBleController extends ChangeNotifier {
         _storedSafetyKey = GuoranProtocol.storedSafetyKeyPayload;
         unawaited(_preferences?.setString(_safetyKeyPreference, GuoranProtocol.storedSafetyKeyPayload));
         _setStatus('Handshake complete, syncing device state...');
-        unawaited(_requestSnapshot(force: true));
+        unawaited(_startSnapshotSync());
         break;
       case SafetyKeyResult.incorrect:
         if (_sentFallbackSafetyKey) {
@@ -537,6 +615,7 @@ class GuoranBleController extends ChangeNotifier {
   }
 
   void _applySnapshot(GuoranSnapshot snapshot) {
+    _markSnapshotSyncComplete();
     _snapshot = snapshot;
     _acquisitionSystemTimeEnabled = snapshot.acquisitionSystemTimeEnabled;
     _alarm1Enabled = snapshot.alarm1Enabled;
@@ -566,23 +645,86 @@ class GuoranBleController extends ChangeNotifier {
     await _sendCommand(command);
   }
 
+  Future<void> _startSnapshotSync() async {
+    _resetSnapshotSyncState(clearBuffer: true);
+    _snapshotSyncInProgress = true;
+    await _requestSnapshot(force: true);
+  }
+
   Future<void> _requestSnapshot({bool force = false}) async {
-    if (_writeCharacteristic == null) {
+    final BluetoothCharacteristic? characteristic = _writeCharacteristic;
+    if (characteristic == null) {
       _log('Snapshot request skipped because write characteristic is unresolved.', notify: false);
       return;
     }
 
     if (!force && _lastSnapshotRequestAt != null) {
       final Duration elapsed = DateTime.now().difference(_lastSnapshotRequestAt!);
-      if (elapsed < const Duration(milliseconds: 800)) {
+      if (elapsed < _snapshotRequestThrottle) {
         _log('Snapshot request throttled after ${elapsed.inMilliseconds} ms.', notify: false);
         return;
       }
     }
 
+    if (_snapshotSyncInProgress && _snapshotRequestAttempts >= _maxSnapshotSyncAttempts) {
+      _log('Snapshot request skipped because automatic OSC retries are exhausted.', notify: false);
+      return;
+    }
+
     _lastSnapshotRequestAt = DateTime.now();
-    _log('Requesting snapshot with OSC.', notify: false);
-    await _sendCommand(GuoranProtocol.snapshotCommand);
+    if (_snapshotSyncInProgress) {
+      _snapshotRequestAttempts += 1;
+    }
+
+    final String attemptSuffix = _snapshotSyncInProgress ? ' (attempt $_snapshotRequestAttempts of $_maxSnapshotSyncAttempts)' : '';
+    _log('Requesting snapshot with OSC$attemptSuffix.', notify: false);
+    await _sendCommand(GuoranProtocol.snapshotCommand, withoutResponse: _shouldUseWithoutResponseForSnapshot(characteristic));
+
+    if (_snapshotSyncInProgress) {
+      _armSnapshotWatchdog();
+    }
+  }
+
+  void _armSnapshotWatchdog() {
+    _cancelSnapshotWatchdog();
+    _snapshotWatchdogTimer = Timer(_snapshotResponseTimeout, () {
+      if (!_snapshotSyncInProgress) {
+        return;
+      }
+
+      if (_snapshotRequestAttempts >= _maxSnapshotSyncAttempts) {
+        _log('Snapshot sync timed out after $_snapshotRequestAttempts OSC attempts.', notify: false);
+        return;
+      }
+
+      _log('Snapshot response timed out. Retrying OSC.', notify: false);
+      unawaited(_requestSnapshot(force: true));
+    });
+  }
+
+  void _cancelSnapshotWatchdog() {
+    _snapshotWatchdogTimer?.cancel();
+    _snapshotWatchdogTimer = null;
+  }
+
+  void _resetSnapshotSyncState({required bool clearBuffer}) {
+    _cancelSnapshotWatchdog();
+    _snapshotSyncInProgress = false;
+    _snapshotRequestAttempts = 0;
+    _lastSnapshotRequestAt = null;
+    if (clearBuffer) {
+      _incomingSnapshotBuffer = '';
+    }
+  }
+
+  void _markSnapshotSyncComplete() {
+    _cancelSnapshotWatchdog();
+    _snapshotSyncInProgress = false;
+    _snapshotRequestAttempts = 0;
+  }
+
+  bool _shouldUseWithoutResponseForSnapshot(BluetoothCharacteristic characteristic) {
+    return characteristic.properties.writeWithoutResponse;
   }
 
   Future<void> _writeSafetyKey(String payload) async {
@@ -595,30 +737,25 @@ class GuoranBleController extends ChangeNotifier {
     await _writeCharacteristicValue(characteristic, GuoranProtocol.encodeAscii(payload));
   }
 
-  Future<void> _sendCommand(String command) async {
+  Future<void> _sendCommand(String command, {bool? withoutResponse}) async {
     final BluetoothCharacteristic? characteristic = _writeCharacteristic;
     if (characteristic == null) {
       throw StateError('Write characteristic is not available.');
     }
 
     _log('Sending command "$command" via ${characteristic.uuid.str}.', notify: false);
-    await _writeCharacteristicValue(characteristic, GuoranProtocol.encodeAscii(command));
+    await _writeCharacteristicValue(characteristic, GuoranProtocol.encodeAscii(command), withoutResponse: withoutResponse);
   }
 
-  Future<void> _writeCharacteristicValue(
-    BluetoothCharacteristic characteristic,
-    List<int> payload,
-  ) async {
-    final bool withoutResponse = characteristic.properties.writeWithoutResponse && !characteristic.properties.write;
-    _log(
-      'Write ${characteristic.uuid.str} hex=${_formatHex(payload)} withoutResponse=$withoutResponse.',
-      notify: false,
-    );
-    await characteristic.write(payload, withoutResponse: withoutResponse);
+  Future<void> _writeCharacteristicValue(BluetoothCharacteristic characteristic, List<int> payload, {bool? withoutResponse}) async {
+    final bool useWithoutResponse = withoutResponse ?? (characteristic.properties.writeWithoutResponse && !characteristic.properties.write);
+    _log('Write ${characteristic.uuid.str} hex=${_formatHex(payload)} withoutResponse=$useWithoutResponse.', notify: false);
+    await characteristic.write(payload, withoutResponse: useWithoutResponse);
   }
 
   Future<void> _disconnectCurrentDevice() async {
     _stopSystemTimeUpdates();
+    _cancelSnapshotWatchdog();
     await _readValueSubscription?.cancel();
     _readValueSubscription = null;
     await _safetyKeyValueSubscription?.cancel();
@@ -656,7 +793,8 @@ class GuoranBleController extends ChangeNotifier {
     }
 
     return result.advertisementData.serviceUuids.any(
-      (Guid guid) => GuoranProtocol.matchesShortUuid(guid.str, GuoranProtocol.scanServices.first) ||
+      (Guid guid) =>
+          GuoranProtocol.matchesShortUuid(guid.str, GuoranProtocol.scanServices.first) ||
           GuoranProtocol.matchesShortUuid(guid.str, GuoranProtocol.scanServices.last),
     );
   }
@@ -696,17 +834,16 @@ class GuoranBleController extends ChangeNotifier {
       return const <String>['No services discovered.'];
     }
 
-    return services.map<String>((BluetoothService service) {
-      final Iterable<String> characteristicDescriptions = service.characteristics.map<String>(
-        (BluetoothCharacteristic characteristic) =>
-            '  - ${characteristic.uuid.str} ${_describeCharacteristicProperties(characteristic)}',
-      );
+    return services
+        .map<String>((BluetoothService service) {
+          final Iterable<String> characteristicDescriptions = service.characteristics.map<String>(
+            (BluetoothCharacteristic characteristic) =>
+                '  - ${characteristic.uuid.str} ${_describeCharacteristicProperties(characteristic)}',
+          );
 
-      return <String>[
-        'Service ${service.uuid.str}',
-        ...characteristicDescriptions,
-      ].join('\n');
-    }).toList(growable: false);
+          return <String>['Service ${service.uuid.str}', ...characteristicDescriptions].join('\n');
+        })
+        .toList(growable: false);
   }
 
   String _describeCharacteristicProperties(BluetoothCharacteristic characteristic) {
@@ -800,8 +937,7 @@ class GuoranBleController extends ChangeNotifier {
     _sentFallbackSafetyKey = false;
     _hasObservedConnectedState = false;
     _connectFlowInProgress = false;
-    _incomingSnapshotBuffer = '';
-    _lastSnapshotRequestAt = null;
+    _resetSnapshotSyncState(clearBuffer: true);
     _acquisitionSystemTimeEnabled = false;
     _alarm1Enabled = false;
     _alarm2Enabled = false;
@@ -824,6 +960,57 @@ class GuoranBleController extends ChangeNotifier {
 
   void _clearError() {
     _errorMessage = null;
+  }
+
+  Future<void> _maybeStartAutomaticScan() async {
+    if (!_shouldAutoScanWhenReady || _adapterState != BluetoothAdapterState.on || _isScanning || _connectedDevice != null) {
+      return;
+    }
+
+    _shouldAutoScanWhenReady = false;
+    await startScan();
+  }
+
+  Future<void> _runSaveOperation({required String progressMessage, required Future<void> Function() action}) async {
+    _clearError();
+    _isBusy = true;
+    _setStatus(progressMessage, notify: false);
+    notifyListeners();
+
+    try {
+      await action();
+    } catch (error) {
+      _setError('Unable to save setting: $error');
+      rethrow;
+    } finally {
+      _isBusy = false;
+      notifyListeners();
+    }
+  }
+
+  String _toggleCommandForAlarm(GuoranTimeField field, bool enabled) {
+    switch (field) {
+      case GuoranTimeField.alarm1:
+        return enabled ? GuoranProtocol.enableAlarm1 : GuoranProtocol.disableAlarm1;
+      case GuoranTimeField.alarm2:
+        return enabled ? GuoranProtocol.enableAlarm2 : GuoranProtocol.disableAlarm2;
+      case GuoranTimeField.boot:
+      case GuoranTimeField.off:
+        throw ArgumentError.value(field, 'field', 'Alarm settings only support alarm1 or alarm2.');
+    }
+  }
+
+  String _timeFieldLabel(GuoranTimeField field) {
+    switch (field) {
+      case GuoranTimeField.alarm1:
+        return 'Alarm 1';
+      case GuoranTimeField.alarm2:
+        return 'Alarm 2';
+      case GuoranTimeField.boot:
+        return 'Boot time';
+      case GuoranTimeField.off:
+        return 'Off time';
+    }
   }
 
   void _setStatus(String message, {bool notify = true}) {
