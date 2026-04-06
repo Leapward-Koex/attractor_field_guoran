@@ -13,8 +13,11 @@ class GuoranRouteNames {
   static const String discovery = '/';
   static const String device = '/device';
   static const String timeSync = '/settings/time-sync';
+  static const String colorConsole = '/settings/color-console';
+  static const String operatingButtons = '/settings/operating-buttons';
   static const String alarm = '/settings/alarm';
   static const String scheduledPower = '/settings/scheduled-power';
+  static const String otherSettings = '/settings/other-settings';
   static const String debug = '/debug';
 }
 
@@ -37,6 +40,12 @@ Route<dynamic> buildGuoranRoute(RouteSettings settings, GuoranBleController cont
     case GuoranRouteNames.timeSync:
       page = GuoranTimeSyncRoutePage(controller: controller);
       break;
+    case GuoranRouteNames.colorConsole:
+      page = GuoranColorConsoleRoutePage(controller: controller);
+      break;
+    case GuoranRouteNames.operatingButtons:
+      page = GuoranOperatingButtonsRoutePage(controller: controller);
+      break;
     case GuoranRouteNames.alarm:
       final Object? arguments = settings.arguments;
       if (arguments is! GuoranAlarmPageArguments) {
@@ -47,6 +56,9 @@ Route<dynamic> buildGuoranRoute(RouteSettings settings, GuoranBleController cont
       break;
     case GuoranRouteNames.scheduledPower:
       page = GuoranScheduledPowerRoutePage(controller: controller);
+      break;
+    case GuoranRouteNames.otherSettings:
+      page = GuoranOtherSettingsRoutePage(controller: controller);
       break;
     case GuoranRouteNames.debug:
       page = GuoranDebugRoutePage(controller: controller);
@@ -287,7 +299,7 @@ class GuoranDeviceRoutePage extends StatelessWidget {
                       GuoranSectionCard(
                         title: 'Waiting for device snapshot',
                         subtitle:
-                            'The OSC snapshot is still loading. Device Time Sync is available now, while the other setting cards stay disabled until the snapshot is ready.',
+                            'The OSC snapshot is still loading. Device Time Sync, Color Console, Operating Buttons, and Other Settings are available now. Alarm and scheduled power stay disabled until the snapshot is ready.',
                         child: Row(
                           children: <Widget>[
                             const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.4)),
@@ -304,12 +316,34 @@ class GuoranDeviceRoutePage extends StatelessWidget {
                           ? (controller.acquisitionSystemTimeEnabled
                                 ? 'Currently following the current time from the phone.'
                                 : 'Send a manual time or switch back to current time.')
-                          : controller.canSendTimeWithoutSnapshot
+                          : controller.canSendCommandsWithoutSnapshot
                           ? 'Available now. You can send current or manual time while the snapshot is still loading.'
                           : 'Waiting for the device handshake before time controls can be edited.',
                       icon: Icons.schedule,
                       enabled: controller.canSendTimeWithoutSnapshot,
                       onTap: () => Navigator.of(context).pushNamed(GuoranRouteNames.timeSync),
+                    ),
+                    const SizedBox(height: 12),
+                    GuoranNavigationCard(
+                      title: 'Color Console',
+                      subtitle: controller.hasSnapshot
+                          ? _colorConsoleSummary(controller)
+                          : controller.canSendCommandsWithoutSnapshot
+                          ? 'Send RGB color, light-channel toggles, and K01-K03 commands now.'
+                          : 'Waiting for the device handshake before color commands can be sent.',
+                      icon: Icons.palette_outlined,
+                      enabled: controller.canSendCommandsWithoutSnapshot,
+                      onTap: () => Navigator.of(context).pushNamed(GuoranRouteNames.colorConsole),
+                    ),
+                    const SizedBox(height: 12),
+                    GuoranNavigationCard(
+                      title: 'Operating Buttons',
+                      subtitle: controller.canSendCommandsWithoutSnapshot
+                          ? 'Send K04-K09 button presses immediately, without waiting for the OSC snapshot.'
+                          : 'Waiting for the device handshake before operating buttons can be sent.',
+                      icon: Icons.tune,
+                      enabled: controller.canSendCommandsWithoutSnapshot,
+                      onTap: () => Navigator.of(context).pushNamed(GuoranRouteNames.operatingButtons),
                     ),
                     const SizedBox(height: 12),
                     GuoranNavigationCard(
@@ -344,6 +378,18 @@ class GuoranDeviceRoutePage extends StatelessWidget {
                       icon: Icons.power_settings_new,
                       enabled: controller.hasSnapshot,
                       onTap: () => Navigator.of(context).pushNamed(GuoranRouteNames.scheduledPower),
+                    ),
+                    const SizedBox(height: 12),
+                    GuoranNavigationCard(
+                      title: 'Other Settings',
+                      subtitle: controller.hasSnapshot
+                          ? _otherSettingsSummary(controller)
+                          : controller.canSendCommandsWithoutSnapshot
+                          ? 'Toggle the SA-SF options now. Snapshot data will still load in the background.'
+                          : 'Waiting for the device handshake before other settings can be changed.',
+                      icon: Icons.settings_suggest_outlined,
+                      enabled: controller.canSendCommandsWithoutSnapshot,
+                      onTap: () => Navigator.of(context).pushNamed(GuoranRouteNames.otherSettings),
                     ),
                     const SizedBox(height: 12),
                     GuoranNavigationCard(
@@ -866,6 +912,556 @@ class _GuoranScheduledPowerRoutePageState extends State<GuoranScheduledPowerRout
   }
 }
 
+class GuoranColorConsoleRoutePage extends StatefulWidget {
+  const GuoranColorConsoleRoutePage({super.key, required this.controller});
+
+  final GuoranBleController controller;
+
+  @override
+  State<GuoranColorConsoleRoutePage> createState() => _GuoranColorConsoleRoutePageState();
+}
+
+class _GuoranColorConsoleRoutePageState extends State<GuoranColorConsoleRoutePage> {
+  late double _colorSliderValue;
+  late List<bool> _lightSwitches;
+
+  @override
+  void initState() {
+    super.initState();
+    _colorSliderValue = widget.controller.colorSliderValue.toDouble();
+    _lightSwitches = _normalizedLightSwitches(widget.controller.lightSwitches);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: widget.controller,
+      builder: (BuildContext context, Widget? child) {
+        final bool pageEnabled = widget.controller.canSendCommandsWithoutSnapshot && widget.controller.connectedDevice != null;
+        final int sliderValue = _colorSliderValue.round();
+        final Color previewColor = GuoranProtocol.colorFromSliderValue(sliderValue);
+        return Scaffold(
+          appBar: AppBar(
+            title: const Text('Color Console'),
+            backgroundColor: Colors.transparent,
+            surfaceTintColor: Colors.transparent,
+            elevation: 0,
+            scrolledUnderElevation: 0,
+          ),
+          body: GuoranGradientPage(
+            children: <Widget>[
+              if (!pageEnabled) ...<Widget>[
+                GuoranMessageCard(
+                  icon: Icons.hourglass_bottom,
+                  title: 'Handshake Required',
+                  message: 'Wait for the device handshake to finish before sending color or light commands.',
+                  backgroundColor: const Color(0xFFF7F1DF),
+                  borderColor: const Color(0xFFE7D59D),
+                  foregroundColor: const Color(0xFF6A5720),
+                ),
+                const SizedBox(height: 16),
+              ],
+              if (pageEnabled && !widget.controller.hasSnapshot) ...<Widget>[
+                const GuoranMessageCard(
+                  icon: Icons.palette_outlined,
+                  title: 'Snapshot Still Loading',
+                  message:
+                      'Color commands do not need the OSC snapshot. The current values may update after sync finishes, but you can send new ones now.',
+                  backgroundColor: Color(0xFFE8F3EC),
+                  borderColor: Color(0xFFB6D8C2),
+                  foregroundColor: Color(0xFF1F5A34),
+                ),
+                const SizedBox(height: 16),
+              ],
+              if (widget.controller.errorMessage != null) ...<Widget>[
+                GuoranMessageCard(
+                  icon: Icons.error_outline,
+                  title: 'Send Error',
+                  message: widget.controller.errorMessage!,
+                  backgroundColor: const Color(0xFFFFECE8),
+                  borderColor: const Color(0xFFF1B8AA),
+                  foregroundColor: const Color(0xFF7E2A19),
+                ),
+                const SizedBox(height: 16),
+              ],
+              GuoranSectionCard(
+                title: 'RGB Color',
+                subtitle: 'This matches the source app\'s 0-1530 rainbow slider. Save sends one Rxxx-Gxxx-Bxxx command.',
+                enabled: pageEnabled,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: previewColor.withValues(alpha: 0.18),
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: previewColor.withValues(alpha: 0.35)),
+                      ),
+                      child: Row(
+                        children: <Widget>[
+                          Container(
+                            width: 56,
+                            height: 56,
+                            decoration: BoxDecoration(color: previewColor, borderRadius: BorderRadius.circular(18)),
+                          ),
+                          const SizedBox(width: 14),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: <Widget>[
+                                Text('Preview ${_colorHexLabel(sliderValue)}', style: Theme.of(context).textTheme.titleMedium),
+                                const SizedBox(height: 4),
+                                Text(
+                                  GuoranProtocol.buildColorCommand(sliderValue),
+                                  style: Theme.of(context).textTheme.bodySmall?.copyWith(fontFamily: 'monospace'),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Slider(
+                      min: 0,
+                      max: GuoranProtocol.maxColorSliderValue.toDouble(),
+                      value: _colorSliderValue.clamp(0, GuoranProtocol.maxColorSliderValue.toDouble()),
+                      onChanged: widget.controller.isBusy || !pageEnabled
+                          ? null
+                          : (double value) {
+                              setState(() {
+                                _colorSliderValue = value;
+                              });
+                            },
+                    ),
+                    Text(
+                      'Slider value $sliderValue of ${GuoranProtocol.maxColorSliderValue}',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+              GuoranSectionCard(
+                title: 'Color Actions',
+                subtitle: 'These match K01, K02, and K03 in the source app and send immediately.',
+                enabled: pageEnabled,
+                child: Wrap(
+                  spacing: 10,
+                  runSpacing: 10,
+                  children: <Widget>[
+                    for (final _GuoranActionDescriptor action in _colorConsoleActions)
+                      SizedBox(
+                        width: 108,
+                        child: OutlinedButton.icon(
+                          onPressed: widget.controller.isBusy || !pageEnabled ? null : () => _sendAction(action),
+                          icon: Icon(action.icon),
+                          label: Text(action.label),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+              GuoranSectionCard(
+                title: 'Light Switches',
+                subtitle: 'Set the six S11-S61 channels here, then save them together with the selected RGB value.',
+                enabled: pageEnabled,
+                child: Column(
+                  children: <Widget>[
+                    for (int index = 0; index < _lightSwitches.length; index++) ...<Widget>[
+                      SwitchListTile.adaptive(
+                        contentPadding: EdgeInsets.zero,
+                        title: Text(_lightSwitchLabels[index]),
+                        subtitle: Text(_lightSwitches[index] ? 'Enabled' : 'Disabled'),
+                        value: _lightSwitches[index],
+                        onChanged: widget.controller.isBusy || !pageEnabled
+                            ? null
+                            : (bool value) {
+                                setState(() {
+                                  _lightSwitches[index] = value;
+                                });
+                              },
+                      ),
+                      if (index < _lightSwitches.length - 1) const Divider(height: 1),
+                    ],
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: widget.controller.isBusy || !pageEnabled ? null : _save,
+                  icon: const Icon(Icons.save_outlined),
+                  label: Text(widget.controller.isBusy ? 'Saving...' : 'Save to device'),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  List<bool> _normalizedLightSwitches(List<bool> source) {
+    final List<bool> normalized = List<bool>.filled(GuoranProtocol.lightSwitchCount, false, growable: false);
+    for (int index = 0; index < normalized.length && index < source.length; index++) {
+      normalized[index] = source[index];
+    }
+    return normalized;
+  }
+
+  Future<void> _sendAction(_GuoranActionDescriptor action) async {
+    try {
+      await widget.controller.sendColorConsoleAction(action.command, successMessage: action.successMessage);
+      if (!mounted) {
+        return;
+      }
+      _showResultSnackBar(context, success: true, message: action.successMessage);
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+      _showResultSnackBar(context, success: false, message: widget.controller.errorMessage ?? 'Unable to send ${action.label}.');
+    }
+  }
+
+  Future<void> _save() async {
+    try {
+      await widget.controller.saveColorConsoleSettings(
+        colorSliderValue: _colorSliderValue.round(),
+        lightSwitches: List<bool>.from(_lightSwitches, growable: false),
+      );
+      if (!mounted) {
+        return;
+      }
+      _showResultSnackBar(context, success: true, message: 'Color console saved to the device.');
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+      _showResultSnackBar(context, success: false, message: widget.controller.errorMessage ?? 'Unable to save the color console.');
+    }
+  }
+}
+
+class GuoranOperatingButtonsRoutePage extends StatelessWidget {
+  const GuoranOperatingButtonsRoutePage({super.key, required this.controller});
+
+  final GuoranBleController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (BuildContext context, Widget? child) {
+        final bool pageEnabled = controller.canSendCommandsWithoutSnapshot && controller.connectedDevice != null;
+        return Scaffold(
+          appBar: AppBar(
+            title: const Text('Operating Buttons'),
+            backgroundColor: Colors.transparent,
+            surfaceTintColor: Colors.transparent,
+            elevation: 0,
+            scrolledUnderElevation: 0,
+          ),
+          body: GuoranGradientPage(
+            children: <Widget>[
+              if (!pageEnabled) ...<Widget>[
+                GuoranMessageCard(
+                  icon: Icons.hourglass_bottom,
+                  title: 'Handshake Required',
+                  message: 'Wait for the device handshake to finish before sending operating button presses.',
+                  backgroundColor: const Color(0xFFF7F1DF),
+                  borderColor: const Color(0xFFE7D59D),
+                  foregroundColor: const Color(0xFF6A5720),
+                ),
+                const SizedBox(height: 16),
+              ],
+              if (pageEnabled && !controller.hasSnapshot) ...<Widget>[
+                const GuoranMessageCard(
+                  icon: Icons.touch_app_outlined,
+                  title: 'Immediate Commands',
+                  message: 'These buttons map to K04-K09 and do not require the OSC snapshot. Each press sends immediately.',
+                  backgroundColor: Color(0xFFE8F3EC),
+                  borderColor: Color(0xFFB6D8C2),
+                  foregroundColor: Color(0xFF1F5A34),
+                ),
+                const SizedBox(height: 16),
+              ],
+              if (controller.errorMessage != null) ...<Widget>[
+                GuoranMessageCard(
+                  icon: Icons.error_outline,
+                  title: 'Send Error',
+                  message: controller.errorMessage!,
+                  backgroundColor: const Color(0xFFFFECE8),
+                  borderColor: const Color(0xFFF1B8AA),
+                  foregroundColor: const Color(0xFF7E2A19),
+                ),
+                const SizedBox(height: 16),
+              ],
+              GuoranSectionCard(
+                title: 'Operating Buttons',
+                subtitle: 'These match the source app\'s K04-K09 actions. Each tile sends a command as soon as you tap it.',
+                enabled: pageEnabled,
+                child: GridView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: _operatingButtonActions.length,
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 2,
+                    mainAxisSpacing: 12,
+                    crossAxisSpacing: 12,
+                    childAspectRatio: 1.9,
+                  ),
+                  itemBuilder: (BuildContext context, int index) {
+                    final _GuoranActionDescriptor action = _operatingButtonActions[index];
+                    return FilledButton.tonalIcon(
+                      onPressed: controller.isBusy || !pageEnabled ? null : () => _sendAction(context, action),
+                      icon: Icon(action.icon),
+                      label: Text(action.label),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _sendAction(BuildContext context, _GuoranActionDescriptor action) async {
+    try {
+      await controller.sendOperatingButtonCommand(action.command, successMessage: action.successMessage);
+      if (!context.mounted) {
+        return;
+      }
+      _showResultSnackBar(context, success: true, message: action.successMessage);
+    } catch (_) {
+      if (!context.mounted) {
+        return;
+      }
+      _showResultSnackBar(context, success: false, message: controller.errorMessage ?? 'Unable to send ${action.label}.');
+    }
+  }
+}
+
+class GuoranOtherSettingsRoutePage extends StatefulWidget {
+  const GuoranOtherSettingsRoutePage({super.key, required this.controller});
+
+  final GuoranBleController controller;
+
+  @override
+  State<GuoranOtherSettingsRoutePage> createState() => _GuoranOtherSettingsRoutePageState();
+}
+
+class _GuoranOtherSettingsRoutePageState extends State<GuoranOtherSettingsRoutePage> {
+  late bool _luxAutoEnabled;
+  late bool _onTimeAlarmEnabled;
+  late bool _timeFormat12Enabled;
+  late bool _usingEnglishEnabled;
+  late bool _ambientLightInductionEnabled;
+  late bool _inductiveSwitchEnabled;
+
+  @override
+  void initState() {
+    super.initState();
+    _luxAutoEnabled = widget.controller.luxAutoEnabled;
+    _onTimeAlarmEnabled = widget.controller.onTimeAlarmEnabled;
+    _timeFormat12Enabled = widget.controller.timeFormat12Enabled;
+    _usingEnglishEnabled = widget.controller.usingEnglishEnabled;
+    _ambientLightInductionEnabled = widget.controller.ambientLightInductionEnabled;
+    _inductiveSwitchEnabled = widget.controller.inductiveSwitchEnabled;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: widget.controller,
+      builder: (BuildContext context, Widget? child) {
+        final bool pageEnabled = widget.controller.canSendCommandsWithoutSnapshot && widget.controller.connectedDevice != null;
+        return Scaffold(
+          appBar: AppBar(
+            title: const Text('Other Settings'),
+            backgroundColor: Colors.transparent,
+            surfaceTintColor: Colors.transparent,
+            elevation: 0,
+            scrolledUnderElevation: 0,
+          ),
+          body: GuoranGradientPage(
+            children: <Widget>[
+              if (!pageEnabled) ...<Widget>[
+                GuoranMessageCard(
+                  icon: Icons.hourglass_bottom,
+                  title: 'Handshake Required',
+                  message: 'Wait for the device handshake to finish before changing these source-app options.',
+                  backgroundColor: const Color(0xFFF7F1DF),
+                  borderColor: const Color(0xFFE7D59D),
+                  foregroundColor: const Color(0xFF6A5720),
+                ),
+                const SizedBox(height: 16),
+              ],
+              if (pageEnabled && !widget.controller.hasSnapshot) ...<Widget>[
+                const GuoranMessageCard(
+                  icon: Icons.settings_suggest_outlined,
+                  title: 'Snapshot Still Loading',
+                  message:
+                      'These SA-SF toggles can be sent before the OSC snapshot finishes. The current values may refresh when the snapshot arrives.',
+                  backgroundColor: Color(0xFFE8F3EC),
+                  borderColor: Color(0xFFB6D8C2),
+                  foregroundColor: Color(0xFF1F5A34),
+                ),
+                const SizedBox(height: 16),
+              ],
+              if (widget.controller.errorMessage != null) ...<Widget>[
+                GuoranMessageCard(
+                  icon: Icons.error_outline,
+                  title: 'Save Error',
+                  message: widget.controller.errorMessage!,
+                  backgroundColor: const Color(0xFFFFECE8),
+                  borderColor: const Color(0xFFF1B8AA),
+                  foregroundColor: const Color(0xFF7E2A19),
+                ),
+                const SizedBox(height: 16),
+              ],
+              GuoranSectionCard(
+                title: 'Source-App Toggles',
+                subtitle: 'These correspond to SA, SB, SC, SD, SE, and SF in the original app. Stage any changes, then save them together.',
+                enabled: pageEnabled,
+                child: Column(
+                  children: <Widget>[
+                    _buildToggle(
+                      title: 'LUX Auto',
+                      subtitle: 'SA · Enable automatic brightness behavior.',
+                      value: _luxAutoEnabled,
+                      enabled: pageEnabled,
+                      onChanged: (bool value) {
+                        setState(() {
+                          _luxAutoEnabled = value;
+                        });
+                      },
+                    ),
+                    const Divider(height: 1),
+                    _buildToggle(
+                      title: 'On-Time Alarm',
+                      subtitle: 'SD · Enable the source app\'s on-time alarm option.',
+                      value: _onTimeAlarmEnabled,
+                      enabled: pageEnabled,
+                      onChanged: (bool value) {
+                        setState(() {
+                          _onTimeAlarmEnabled = value;
+                        });
+                      },
+                    ),
+                    const Divider(height: 1),
+                    _buildToggle(
+                      title: '12-Hour Format',
+                      subtitle: 'SB · Switch the time display format.',
+                      value: _timeFormat12Enabled,
+                      enabled: pageEnabled,
+                      onChanged: (bool value) {
+                        setState(() {
+                          _timeFormat12Enabled = value;
+                        });
+                      },
+                    ),
+                    const Divider(height: 1),
+                    _buildToggle(
+                      title: 'Use English',
+                      subtitle: 'SE · Toggle the device\'s English mode.',
+                      value: _usingEnglishEnabled,
+                      enabled: pageEnabled,
+                      onChanged: (bool value) {
+                        setState(() {
+                          _usingEnglishEnabled = value;
+                        });
+                      },
+                    ),
+                    const Divider(height: 1),
+                    _buildToggle(
+                      title: 'Ambient Light Induction',
+                      subtitle: 'SC · Toggle ambient light sensing behavior.',
+                      value: _ambientLightInductionEnabled,
+                      enabled: pageEnabled,
+                      onChanged: (bool value) {
+                        setState(() {
+                          _ambientLightInductionEnabled = value;
+                        });
+                      },
+                    ),
+                    const Divider(height: 1),
+                    _buildToggle(
+                      title: 'Inductive Switch',
+                      subtitle: 'SF · Toggle the inductive switch option.',
+                      value: _inductiveSwitchEnabled,
+                      enabled: pageEnabled,
+                      onChanged: (bool value) {
+                        setState(() {
+                          _inductiveSwitchEnabled = value;
+                        });
+                      },
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: widget.controller.isBusy || !pageEnabled ? null : _save,
+                  icon: const Icon(Icons.save_outlined),
+                  label: Text(widget.controller.isBusy ? 'Saving...' : 'Save to device'),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildToggle({
+    required String title,
+    required String subtitle,
+    required bool value,
+    required bool enabled,
+    required ValueChanged<bool> onChanged,
+  }) {
+    return SwitchListTile.adaptive(
+      contentPadding: EdgeInsets.zero,
+      title: Text(title),
+      subtitle: Text(subtitle),
+      value: value,
+      onChanged: widget.controller.isBusy || !enabled ? null : onChanged,
+    );
+  }
+
+  Future<void> _save() async {
+    try {
+      await widget.controller.saveOtherSettings(
+        luxAutoEnabled: _luxAutoEnabled,
+        onTimeAlarmEnabled: _onTimeAlarmEnabled,
+        timeFormat12Enabled: _timeFormat12Enabled,
+        usingEnglishEnabled: _usingEnglishEnabled,
+        ambientLightInductionEnabled: _ambientLightInductionEnabled,
+        inductiveSwitchEnabled: _inductiveSwitchEnabled,
+      );
+      if (!mounted) {
+        return;
+      }
+      _showResultSnackBar(context, success: true, message: 'Other settings saved to the device.');
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+      _showResultSnackBar(context, success: false, message: widget.controller.errorMessage ?? 'Unable to save the other settings.');
+    }
+  }
+}
+
 class GuoranDebugRoutePage extends StatelessWidget {
   const GuoranDebugRoutePage({super.key, required this.controller});
 
@@ -1206,6 +1802,84 @@ class GuoranMessageCard extends StatelessWidget {
   }
 }
 
+class _GuoranActionDescriptor {
+  const _GuoranActionDescriptor({required this.command, required this.label, required this.icon, required this.successMessage});
+
+  final String command;
+  final String label;
+  final IconData icon;
+  final String successMessage;
+}
+
+const List<String> _lightSwitchLabels = <String>[
+  'Light Switch 1',
+  'Light Switch 2',
+  'Light Switch 3',
+  'Light Switch 4',
+  'Light Switch 5',
+  'Light Switch 6',
+];
+
+const List<_GuoranActionDescriptor> _colorConsoleActions = <_GuoranActionDescriptor>[
+  _GuoranActionDescriptor(
+    command: GuoranProtocol.colorActionPrevious,
+    label: 'K01 <',
+    icon: Icons.skip_previous_rounded,
+    successMessage: 'K01 sent to the device.',
+  ),
+  _GuoranActionDescriptor(
+    command: GuoranProtocol.colorActionMode,
+    label: 'K02 M',
+    icon: Icons.brightness_medium_outlined,
+    successMessage: 'K02 sent to the device.',
+  ),
+  _GuoranActionDescriptor(
+    command: GuoranProtocol.colorActionNext,
+    label: 'K03 >',
+    icon: Icons.skip_next_rounded,
+    successMessage: 'K03 sent to the device.',
+  ),
+];
+
+const List<_GuoranActionDescriptor> _operatingButtonActions = <_GuoranActionDescriptor>[
+  _GuoranActionDescriptor(
+    command: GuoranProtocol.operatingActionPower,
+    label: 'Power',
+    icon: Icons.power_settings_new,
+    successMessage: 'K04 sent to the device.',
+  ),
+  _GuoranActionDescriptor(
+    command: GuoranProtocol.operatingActionBack,
+    label: 'Back',
+    icon: Icons.arrow_back_rounded,
+    successMessage: 'K05 sent to the device.',
+  ),
+  _GuoranActionDescriptor(
+    command: GuoranProtocol.operatingActionPlus,
+    label: 'Plus',
+    icon: Icons.add,
+    successMessage: 'K06 sent to the device.',
+  ),
+  _GuoranActionDescriptor(
+    command: GuoranProtocol.operatingActionSet,
+    label: 'Set',
+    icon: Icons.tune,
+    successMessage: 'K07 sent to the device.',
+  ),
+  _GuoranActionDescriptor(
+    command: GuoranProtocol.operatingActionOk,
+    label: 'OK',
+    icon: Icons.check_circle_outline,
+    successMessage: 'K08 sent to the device.',
+  ),
+  _GuoranActionDescriptor(
+    command: GuoranProtocol.operatingActionMinus,
+    label: 'Minus',
+    icon: Icons.remove,
+    successMessage: 'K09 sent to the device.',
+  ),
+];
+
 class _DebugCountPill extends StatelessWidget {
   const _DebugCountPill({required this.label});
 
@@ -1282,6 +1956,32 @@ String _connectionLabel(BluetoothConnectionState state) {
 
 String _alarmSummary({required bool enabled, required String value}) {
   return '${enabled ? 'Enabled' : 'Disabled'} · $value';
+}
+
+String _colorConsoleSummary(GuoranBleController controller) {
+  final int enabledLights = controller.lightSwitches.where((bool value) => value).length;
+  return '${_colorHexLabel(controller.colorSliderValue)} · $enabledLights of ${GuoranProtocol.lightSwitchCount} light channels enabled.';
+}
+
+String _otherSettingsSummary(GuoranBleController controller) {
+  final int enabledCount = <bool>[
+    controller.luxAutoEnabled,
+    controller.onTimeAlarmEnabled,
+    controller.timeFormat12Enabled,
+    controller.usingEnglishEnabled,
+    controller.ambientLightInductionEnabled,
+    controller.inductiveSwitchEnabled,
+  ].where((bool value) => value).length;
+  return '$enabledCount of 6 source-app toggles enabled.';
+}
+
+String _colorHexLabel(int sliderValue) {
+  final Color color = GuoranProtocol.colorFromSliderValue(sliderValue);
+  final int argb = color.toARGB32();
+  final String red = ((argb >> 16) & 0xFF).toRadixString(16).padLeft(2, '0').toUpperCase();
+  final String green = ((argb >> 8) & 0xFF).toRadixString(16).padLeft(2, '0').toUpperCase();
+  final String blue = (argb & 0xFF).toRadixString(16).padLeft(2, '0').toUpperCase();
+  return '#$red$green$blue';
 }
 
 String _alarmTitle(GuoranTimeField field) {

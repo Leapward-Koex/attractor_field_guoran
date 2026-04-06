@@ -77,6 +77,14 @@ class GuoranBleController extends ChangeNotifier {
   String _alarm2 = '00:00';
   String _bootTime = '00:00';
   String _offTime = '00:00';
+  int _colorSliderValue = GuoranProtocol.defaultColorSliderValue;
+  List<bool> _lightSwitches = List<bool>.filled(GuoranProtocol.lightSwitchCount, false, growable: false);
+  bool _luxAutoEnabled = false;
+  bool _onTimeAlarmEnabled = false;
+  bool _timeFormat12Enabled = false;
+  bool _usingEnglishEnabled = false;
+  bool _ambientLightInductionEnabled = false;
+  bool _inductiveSwitchEnabled = false;
   Timer? _systemTimeTimer;
   bool _connectFlowInProgress = false;
   bool _hasObservedConnectedState = false;
@@ -98,7 +106,8 @@ class GuoranBleController extends ChangeNotifier {
   BluetoothConnectionState get connectionState => _connectionState;
   bool get isConnected => _connectionState == BluetoothConnectionState.connected;
   bool get hasSnapshot => _snapshot != null;
-  bool get canSendTimeWithoutSnapshot => isConnected && _safetyKeyAccepted && _writeCharacteristic != null;
+  bool get canSendCommandsWithoutSnapshot => isConnected && _safetyKeyAccepted && _writeCharacteristic != null;
+  bool get canSendTimeWithoutSnapshot => canSendCommandsWithoutSnapshot;
   bool get isSnapshotPending => isConnected && !hasSnapshot;
   bool get acquisitionSystemTimeEnabled => _acquisitionSystemTimeEnabled;
   bool get alarm1Enabled => _alarm1Enabled;
@@ -108,6 +117,14 @@ class GuoranBleController extends ChangeNotifier {
   String get alarm2 => _alarm2;
   String get bootTime => _bootTime;
   String get offTime => _offTime;
+  int get colorSliderValue => _colorSliderValue;
+  List<bool> get lightSwitches => List<bool>.unmodifiable(_lightSwitches);
+  bool get luxAutoEnabled => _luxAutoEnabled;
+  bool get onTimeAlarmEnabled => _onTimeAlarmEnabled;
+  bool get timeFormat12Enabled => _timeFormat12Enabled;
+  bool get usingEnglishEnabled => _usingEnglishEnabled;
+  bool get ambientLightInductionEnabled => _ambientLightInductionEnabled;
+  bool get inductiveSwitchEnabled => _inductiveSwitchEnabled;
   String get debugReport {
     final List<String> lines = <String>[
       '[State]',
@@ -121,6 +138,22 @@ class GuoranBleController extends ChangeNotifier {
       'safetyKeyAccepted: $_safetyKeyAccepted',
       'sentFallbackSafetyKey: $_sentFallbackSafetyKey',
       'snapshotPresent: ${_snapshot != null}',
+      'colorSliderValue: $_colorSliderValue',
+      'lightSwitches: ${_lightSwitches.map((bool value) => value ? '1' : '0').join()}',
+      'acquisitionSystemTimeEnabled: $_acquisitionSystemTimeEnabled',
+      'alarm1Enabled: $_alarm1Enabled',
+      'alarm2Enabled: $_alarm2Enabled',
+      'timingEnabled: $_timingEnabled',
+      'luxAutoEnabled: $_luxAutoEnabled',
+      'onTimeAlarmEnabled: $_onTimeAlarmEnabled',
+      'timeFormat12Enabled: $_timeFormat12Enabled',
+      'usingEnglishEnabled: $_usingEnglishEnabled',
+      'ambientLightInductionEnabled: $_ambientLightInductionEnabled',
+      'inductiveSwitchEnabled: $_inductiveSwitchEnabled',
+      'alarm1: $_alarm1',
+      'alarm2: $_alarm2',
+      'bootTime: $_bootTime',
+      'offTime: $_offTime',
       'snapshotSyncInProgress: $_snapshotSyncInProgress',
       'snapshotRequestAttempts: $_snapshotRequestAttempts',
       'incomingSnapshotBufferLength: ${_incomingSnapshotBuffer.length}',
@@ -228,6 +261,68 @@ class GuoranBleController extends ChangeNotifier {
         notifyListeners();
       },
     );
+  }
+
+  Future<void> saveColorConsoleSettings({required int colorSliderValue, required List<bool> lightSwitches}) async {
+    if (lightSwitches.length != GuoranProtocol.lightSwitchCount) {
+      throw ArgumentError.value(lightSwitches, 'lightSwitches', 'Expected ${GuoranProtocol.lightSwitchCount} light switches.');
+    }
+
+    await _runSaveOperation(
+      progressMessage: 'Saving color console...',
+      action: () async {
+        final int normalizedColor = colorSliderValue.clamp(0, GuoranProtocol.maxColorSliderValue);
+        await _sendCommand(GuoranProtocol.buildColorCommand(normalizedColor));
+        for (int index = 0; index < lightSwitches.length; index++) {
+          await _sendCommand(GuoranProtocol.lightSwitchCommand(index, lightSwitches[index]));
+        }
+
+        _colorSliderValue = normalizedColor;
+        _lightSwitches = List<bool>.from(lightSwitches, growable: false);
+        _setStatus('Color console saved.', notify: false);
+        notifyListeners();
+      },
+    );
+  }
+
+  Future<void> saveOtherSettings({
+    required bool luxAutoEnabled,
+    required bool onTimeAlarmEnabled,
+    required bool timeFormat12Enabled,
+    required bool usingEnglishEnabled,
+    required bool ambientLightInductionEnabled,
+    required bool inductiveSwitchEnabled,
+  }) async {
+    await _runSaveOperation(
+      progressMessage: 'Saving other settings...',
+      action: () async {
+        await _sendCommand(luxAutoEnabled ? GuoranProtocol.enableLuxAuto : GuoranProtocol.disableLuxAuto);
+        await _sendCommand(onTimeAlarmEnabled ? GuoranProtocol.enableOnTimeAlarm : GuoranProtocol.disableOnTimeAlarm);
+        await _sendCommand(timeFormat12Enabled ? GuoranProtocol.enableTimeFormat12 : GuoranProtocol.disableTimeFormat12);
+        await _sendCommand(usingEnglishEnabled ? GuoranProtocol.enableUsingEnglish : GuoranProtocol.disableUsingEnglish);
+        await _sendCommand(
+          ambientLightInductionEnabled ? GuoranProtocol.enableAmbientLightInduction : GuoranProtocol.disableAmbientLightInduction,
+        );
+        await _sendCommand(inductiveSwitchEnabled ? GuoranProtocol.enableInductiveSwitch : GuoranProtocol.disableInductiveSwitch);
+
+        _luxAutoEnabled = luxAutoEnabled;
+        _onTimeAlarmEnabled = onTimeAlarmEnabled;
+        _timeFormat12Enabled = timeFormat12Enabled;
+        _usingEnglishEnabled = usingEnglishEnabled;
+        _ambientLightInductionEnabled = ambientLightInductionEnabled;
+        _inductiveSwitchEnabled = inductiveSwitchEnabled;
+        _setStatus('Other settings saved.', notify: false);
+        notifyListeners();
+      },
+    );
+  }
+
+  Future<void> sendColorConsoleAction(String command, {required String successMessage}) async {
+    await _sendMomentaryCommand(command: command, progressMessage: 'Sending color console command...', successMessage: successMessage);
+  }
+
+  Future<void> sendOperatingButtonCommand(String command, {required String successMessage}) async {
+    await _sendMomentaryCommand(command: command, progressMessage: 'Sending operating button command...', successMessage: successMessage);
   }
 
   void clearDebugLog() {
@@ -617,18 +712,27 @@ class GuoranBleController extends ChangeNotifier {
   void _applySnapshot(GuoranSnapshot snapshot) {
     _markSnapshotSyncComplete();
     _snapshot = snapshot;
+    _colorSliderValue = snapshot.colorSliderValue;
+    _lightSwitches = List<bool>.from(snapshot.lightSwitches, growable: false);
     _acquisitionSystemTimeEnabled = snapshot.acquisitionSystemTimeEnabled;
     _alarm1Enabled = snapshot.alarm1Enabled;
     _alarm2Enabled = snapshot.alarm2Enabled;
     _timingEnabled = snapshot.timingEnabled;
+    _luxAutoEnabled = snapshot.luxAutoEnabled;
+    _onTimeAlarmEnabled = snapshot.onTimeAlarmEnabled;
+    _timeFormat12Enabled = snapshot.timeFormat12Enabled;
+    _usingEnglishEnabled = snapshot.usingEnglishEnabled;
+    _ambientLightInductionEnabled = snapshot.ambientLightInductionEnabled;
+    _inductiveSwitchEnabled = snapshot.inductiveSwitchEnabled;
     _alarm1 = snapshot.alarm1;
     _alarm2 = snapshot.alarm2;
     _bootTime = snapshot.bootTime;
     _offTime = snapshot.offTime;
     _setStatus('Connected and synchronized.', notify: false);
     _log(
-      'Snapshot applied: alarm1=$_alarm1 alarm2=$_alarm2 boot=$_bootTime off=$_offTime '
-      'sync=$_acquisitionSystemTimeEnabled timing=$_timingEnabled',
+      'Snapshot applied: color=$_colorSliderValue lights=${_lightSwitches.map((bool value) => value ? '1' : '0').join()} '
+      'alarm1=$_alarm1 alarm2=$_alarm2 boot=$_bootTime off=$_offTime '
+      'sync=$_acquisitionSystemTimeEnabled timing=$_timingEnabled other=$_luxAutoEnabled,$_onTimeAlarmEnabled,$_timeFormat12Enabled,$_usingEnglishEnabled,$_ambientLightInductionEnabled,$_inductiveSwitchEnabled',
       notify: false,
     );
 
@@ -946,6 +1050,14 @@ class GuoranBleController extends ChangeNotifier {
     _alarm2 = '00:00';
     _bootTime = '00:00';
     _offTime = '00:00';
+    _colorSliderValue = GuoranProtocol.defaultColorSliderValue;
+    _lightSwitches = List<bool>.filled(GuoranProtocol.lightSwitchCount, false, growable: false);
+    _luxAutoEnabled = false;
+    _onTimeAlarmEnabled = false;
+    _timeFormat12Enabled = false;
+    _usingEnglishEnabled = false;
+    _ambientLightInductionEnabled = false;
+    _inductiveSwitchEnabled = false;
     if (!keepDevice) {
       _connectedDevice = null;
       _connectionState = BluetoothConnectionState.disconnected;
@@ -971,7 +1083,11 @@ class GuoranBleController extends ChangeNotifier {
     await startScan();
   }
 
-  Future<void> _runSaveOperation({required String progressMessage, required Future<void> Function() action}) async {
+  Future<void> _runSaveOperation({
+    required String progressMessage,
+    required Future<void> Function() action,
+    String failureMessage = 'Unable to save setting',
+  }) async {
     _clearError();
     _isBusy = true;
     _setStatus(progressMessage, notify: false);
@@ -980,12 +1096,23 @@ class GuoranBleController extends ChangeNotifier {
     try {
       await action();
     } catch (error) {
-      _setError('Unable to save setting: $error');
+      _setError('$failureMessage: $error');
       rethrow;
     } finally {
       _isBusy = false;
       notifyListeners();
     }
+  }
+
+  Future<void> _sendMomentaryCommand({required String command, required String progressMessage, required String successMessage}) async {
+    await _runSaveOperation(
+      progressMessage: progressMessage,
+      failureMessage: 'Unable to send command',
+      action: () async {
+        await _sendCommand(command);
+        _setStatus(successMessage, notify: false);
+      },
+    );
   }
 
   String _toggleCommandForAlarm(GuoranTimeField field, bool enabled) {
