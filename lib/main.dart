@@ -45,7 +45,7 @@ class _GuoranAppState extends State<GuoranApp> {
     );
 
     return MaterialApp(
-      title: 'Attractor Field Guoran',
+      title: 'Attractor Field',
       debugShowCheckedModeBanner: false,
       theme: baseTheme.copyWith(cardTheme: const CardThemeData(elevation: 0, margin: EdgeInsets.zero)),
       initialRoute: GuoranRouteNames.discovery,
@@ -156,7 +156,7 @@ class _GuoranHomePageState extends State<GuoranHomePage> {
               const SizedBox(width: 14),
               Expanded(
                 child: Text(
-                  'Attractor Field Guoran',
+                  'Attractor Field',
                   style: Theme.of(context).textTheme.headlineSmall?.copyWith(color: Colors.white, fontWeight: FontWeight.w700),
                 ),
               ),

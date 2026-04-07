@@ -5,10 +5,10 @@
 // 'flutter create' template.
 
 // The application's name. By default this is also the title of the Flutter window.
-PRODUCT_NAME = attractor_field_guoran
+PRODUCT_NAME = Attractor Field
 
 // The application's bundle identifier
-PRODUCT_BUNDLE_IDENTIFIER = io.github.scottm.attractorFieldGuoran
+PRODUCT_BUNDLE_IDENTIFIER = com.leapwardkoex.attractorField
 
 // The copyright displayed in application information
 PRODUCT_COPYRIGHT = Copyright © 2026 io.github.scottm. All rights reserved.

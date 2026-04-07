@@ -172,7 +172,7 @@ class GuoranDiscoveryRoutePage extends StatelessWidget {
               const SizedBox(width: 14),
               Expanded(
                 child: Text(
-                  'Attractor Field Guoran',
+                  'Attractor Field',
                   style: Theme.of(context).textTheme.headlineSmall?.copyWith(color: Colors.white, fontWeight: FontWeight.w700),
                 ),
               ),
