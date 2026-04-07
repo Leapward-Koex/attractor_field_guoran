@@ -36,7 +36,7 @@ The current implementation expects this BLE layout:
 - Write service / characteristic: `FFE5` / `FFE9`
 - Safety-key service / characteristics: `FFC0` / `FFC1` / `FFC2`
 
-If a clock is slow to answer the snapshot request, the app automatically retries `OSC`, keeps a rolling debug log, and exposes a full GATT service dump for troubleshooting.
+On Android, the app retries GATT service discovery if the first result is empty or incomplete, matching the behavior of the legacy controller. If a clock is slow to answer the snapshot request, the app also automatically retries `OSC`, keeps a rolling debug log, and exposes a full GATT service dump for troubleshooting.
 
 ## Supported Behavior
 
@@ -55,7 +55,7 @@ Implemented behavior currently includes:
 
 These features map to the clock protocol like this:
 
-- Device Time Sync: current-time sync or manual time send
+- Device Time Sync: send the current phone time once or send a manual time
 - Color Console: one `Rxxx-Gxxx-Bxxx` color command, six `S11`-`S61` light-channel toggles, and the `K01`-`K03` actions
 - Operating Buttons: `K04`-`K09`
 - Other Settings: `SA`-`SF` toggles for LUX Auto, 12-hour format, ambient light induction, on-time alarm, English mode, and inductive switch
@@ -90,7 +90,7 @@ This makes the app much more responsive on devices that are slow to return snaps
 4. Pick your clock from the discovered device list and connect.
 5. Wait for the handshake to complete.
 6. Use the available pages:
-	- Device Time Sync to send the phone time or a manually selected time
+	- Device Time Sync to send the phone time once or a manually selected time
 	- Color Console to choose RGB color, toggle the six light channels, or send `K01`-`K03`
 	- Operating Buttons to send `K04`-`K09`
 	- Other Settings to toggle the `SA`-`SF` options

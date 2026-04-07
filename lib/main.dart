@@ -442,12 +442,13 @@ class _GuoranHomePageState extends State<GuoranHomePage> {
         _buildSectionCard(
           context: context,
           title: 'Device Time Sync',
-          subtitle: 'Matches the original app\'s S71/S70 toggle and \$ timestamp payload.',
+          subtitle: 'Matches the original app\'s S71/S70 toggle and one-shot \$ timestamp payload.',
           child: Column(
             children: <Widget>[
               SwitchListTile.adaptive(
                 contentPadding: EdgeInsets.zero,
-                title: const Text('Continuously sync current system time'),
+                title: const Text('Enable current-time mode'),
+                subtitle: const Text('This does not keep sending time. Use the button below to send the current time once.'),
                 value: _controller.acquisitionSystemTimeEnabled,
                 onChanged: _controller.isBusy ? null : _controller.setAcquisitionSystemTimeEnabled,
               ),

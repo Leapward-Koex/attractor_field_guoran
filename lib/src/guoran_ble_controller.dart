@@ -33,10 +33,15 @@ class GuoranBleController extends ChangeNotifier {
 
   static const _safetyKeyPreference = 'guoran_safety_key';
   static const Duration _connectSettleDelay = Duration(milliseconds: 350);
+  static const Duration _serviceDiscoveryRetryDelay = Duration(milliseconds: 500);
   static const Duration _snapshotRequestThrottle = Duration(milliseconds: 800);
   static const Duration _snapshotResponseTimeout = Duration(milliseconds: 1200);
   static const int _maxConnectFlowAttempts = 2;
+  static const int _maxServiceDiscoveryAttempts = 8;
   static const int _maxSnapshotSyncAttempts = 3;
+  static const int _preferredAndroidMtu = 64;
+  static const int _gattWriteOverhead = 3;
+  static const int _defaultGattPayloadLimit = 20;
 
   BluetoothAdapterState _adapterState = BluetoothAdapterState.unknown;
   List<ScanResult> _scanResults = const <ScanResult>[];
@@ -85,7 +90,6 @@ class GuoranBleController extends ChangeNotifier {
   bool _usingEnglishEnabled = false;
   bool _ambientLightInductionEnabled = false;
   bool _inductiveSwitchEnabled = false;
-  Timer? _systemTimeTimer;
   bool _connectFlowInProgress = false;
   bool _hasObservedConnectedState = false;
   bool _shouldAutoScanWhenReady = true;
@@ -132,6 +136,7 @@ class GuoranBleController extends ChangeNotifier {
       'error: ${_errorMessage ?? '(none)'}',
       'adapterState: ${_adapterState.name}',
       'connectionState: ${_connectionState.name}',
+      'mtu: ${_connectedDevice?.mtuNow ?? 0}',
       'deviceId: ${_connectedDevice?.remoteId.str ?? '(none)'}',
       'deviceName: ${_connectedDevice?.platformName.isNotEmpty == true ? _connectedDevice!.platformName : '(none)'}',
       'storedSafetyKeyPresent: ${_storedSafetyKey != null}',
@@ -202,10 +207,8 @@ class GuoranBleController extends ChangeNotifier {
 
         _acquisitionSystemTimeEnabled = useCurrentTime;
         if (useCurrentTime) {
-          _startSystemTimeUpdates();
-          _setStatus('Device time synced to the current time.', notify: false);
+          _setStatus('Current phone time sent to device.', notify: false);
         } else {
-          _stopSystemTimeUpdates();
           _setStatus('Manual device time sent.', notify: false);
         }
 
@@ -418,12 +421,6 @@ class GuoranBleController extends ChangeNotifier {
     notifyListeners();
 
     await _sendTimeToggleCommand(enabled ? GuoranProtocol.enableSystemTimeSync : GuoranProtocol.disableSystemTimeSync);
-
-    if (enabled) {
-      _startSystemTimeUpdates();
-    } else {
-      _stopSystemTimeUpdates();
-    }
   }
 
   Future<void> syncCurrentSystemTimeNow() async {
@@ -474,7 +471,6 @@ class GuoranBleController extends ChangeNotifier {
 
   @override
   void dispose() {
-    _stopSystemTimeUpdates();
     _cancelSnapshotWatchdog();
     _adapterStateSubscription.cancel();
     _scanResultsSubscription.cancel();
@@ -486,28 +482,59 @@ class GuoranBleController extends ChangeNotifier {
   }
 
   Future<void> _discoverCharacteristics(BluetoothDevice device) async {
-    final List<BluetoothService> services = await device.discoverServices();
-    _log('Discovered ${services.length} services.', notify: false);
-    _serviceDiagnostics = _describeServices(services);
-    _logServiceDiagnostics();
-    notifyListeners();
+    final int maxAttempts = Platform.isAndroid ? _maxServiceDiscoveryAttempts : 1;
+    Object? lastError;
 
-    final BluetoothService readService = _requireService(services, GuoranProtocol.readServiceShort);
-    final BluetoothService writeService = _requireService(services, GuoranProtocol.writeServiceShort);
-    final BluetoothService safetyKeyService = _requireService(services, GuoranProtocol.safetyKeyServiceShort);
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        final List<BluetoothService> services = await device.discoverServices();
+        _log('Service discovery attempt $attempt of $maxAttempts discovered ${services.length} services.', notify: false);
+        _serviceDiagnostics = _describeServices(services);
+        _logServiceDiagnostics();
 
-    _readCharacteristic = _requireCharacteristic(readService, GuoranProtocol.readCharacteristicShort);
-    _writeCharacteristic = _requireCharacteristic(writeService, GuoranProtocol.writeCharacteristicShort);
-    _safetyKeyCharacteristic = _requireCharacteristic(safetyKeyService, GuoranProtocol.safetyKeyCharacteristicShort);
-    _safetyKeyNotifyCharacteristic = _requireCharacteristic(safetyKeyService, GuoranProtocol.safetyKeyNotifyCharacteristicShort);
+        final BluetoothService readService = _requireService(services, GuoranProtocol.readServiceShort);
+        final BluetoothService writeService = _requireService(services, GuoranProtocol.writeServiceShort);
+        final BluetoothService safetyKeyService = _requireService(services, GuoranProtocol.safetyKeyServiceShort);
 
-    _log(
-      'Resolved transport: read=${readService.uuid.str}/${_readCharacteristic?.uuid.str}, '
-      'write=${writeService.uuid.str}/${_writeCharacteristic?.uuid.str}, '
-      'safety=${safetyKeyService.uuid.str}/${_safetyKeyCharacteristic?.uuid.str}, '
-      'safetyNotify=${_safetyKeyNotifyCharacteristic?.uuid.str}',
-      notify: false,
-    );
+        final BluetoothCharacteristic readCharacteristic = _requireCharacteristic(readService, GuoranProtocol.readCharacteristicShort);
+        final BluetoothCharacteristic writeCharacteristic = _requireCharacteristic(writeService, GuoranProtocol.writeCharacteristicShort);
+        final BluetoothCharacteristic safetyKeyCharacteristic = _requireCharacteristic(
+          safetyKeyService,
+          GuoranProtocol.safetyKeyCharacteristicShort,
+        );
+        final BluetoothCharacteristic safetyKeyNotifyCharacteristic = _requireCharacteristic(
+          safetyKeyService,
+          GuoranProtocol.safetyKeyNotifyCharacteristicShort,
+        );
+
+        _readCharacteristic = readCharacteristic;
+        _writeCharacteristic = writeCharacteristic;
+        _safetyKeyCharacteristic = safetyKeyCharacteristic;
+        _safetyKeyNotifyCharacteristic = safetyKeyNotifyCharacteristic;
+
+        _log(
+          'Resolved transport: read=${readService.uuid.str}/${readCharacteristic.uuid.str}, '
+          'write=${writeService.uuid.str}/${writeCharacteristic.uuid.str}, '
+          'safety=${safetyKeyService.uuid.str}/${safetyKeyCharacteristic.uuid.str}, '
+          'safetyNotify=${safetyKeyNotifyCharacteristic.uuid.str}',
+          notify: false,
+        );
+        notifyListeners();
+        return;
+      } catch (error) {
+        lastError = error;
+        _log('Service discovery attempt $attempt of $maxAttempts failed: $error', notify: false);
+      }
+
+      if (attempt >= maxAttempts || device.isDisconnected || _connectionState == BluetoothConnectionState.disconnected) {
+        break;
+      }
+
+      _setStatus('Discovering services... (retry ${attempt + 1} of $maxAttempts)', notify: false);
+      await Future<void>.delayed(_serviceDiscoveryRetryDelay);
+    }
+
+    throw lastError ?? StateError('Unable to resolve required services.');
   }
 
   Future<void> _attachDeviceStateSubscription(BluetoothDevice device) async {
@@ -520,8 +547,6 @@ class GuoranBleController extends ChangeNotifier {
 
       _log('Connection state -> ${state.name}.', notify: false);
       if (state == BluetoothConnectionState.disconnected) {
-        _stopSystemTimeUpdates();
-
         if (_connectFlowInProgress && !_hasObservedConnectedState) {
           _log('Ignoring initial disconnected state while the connect attempt is still starting.', notify: false);
         } else if (_connectFlowInProgress) {
@@ -598,7 +623,11 @@ class GuoranBleController extends ChangeNotifier {
     return message.contains('device is not connected') ||
         message.contains('not connected') ||
         message.contains('fbp-code: 6') ||
-        message.contains('connection canceled');
+        message.contains('connection canceled') ||
+        (Platform.isAndroid &&
+            (message.contains('missing required service') ||
+                message.contains('missing required characteristic') ||
+                message.contains('unable to resolve required services')));
   }
 
   Future<void> _beginHandshake() async {
@@ -736,12 +765,6 @@ class GuoranBleController extends ChangeNotifier {
       notify: false,
     );
 
-    if (_acquisitionSystemTimeEnabled) {
-      _startSystemTimeUpdates();
-    } else {
-      _stopSystemTimeUpdates();
-    }
-
     notifyListeners();
   }
 
@@ -853,12 +876,59 @@ class GuoranBleController extends ChangeNotifier {
 
   Future<void> _writeCharacteristicValue(BluetoothCharacteristic characteristic, List<int> payload, {bool? withoutResponse}) async {
     final bool useWithoutResponse = withoutResponse ?? (characteristic.properties.writeWithoutResponse && !characteristic.properties.write);
-    _log('Write ${characteristic.uuid.str} hex=${_formatHex(payload)} withoutResponse=$useWithoutResponse.', notify: false);
-    await characteristic.write(payload, withoutResponse: useWithoutResponse);
+    final bool allowLongWrite = await _prepareAndroidWriteIfNeeded(characteristic, payload.length, useWithoutResponse);
+    _log(
+      'Write ${characteristic.uuid.str} hex=${_formatHex(payload)} '
+      'withoutResponse=$useWithoutResponse allowLongWrite=$allowLongWrite mtu=${characteristic.device.mtuNow}.',
+      notify: false,
+    );
+    await characteristic.write(payload, withoutResponse: useWithoutResponse, allowLongWrite: allowLongWrite);
+  }
+
+  Future<bool> _prepareAndroidWriteIfNeeded(BluetoothCharacteristic characteristic, int payloadLength, bool useWithoutResponse) async {
+    if (!Platform.isAndroid) {
+      return false;
+    }
+
+    int payloadLimit = _payloadLimitForMtu(characteristic.device.mtuNow);
+    if (payloadLength <= payloadLimit) {
+      return false;
+    }
+
+    final int requestedMtu = (_preferredAndroidMtu > payloadLength + _gattWriteOverhead)
+        ? _preferredAndroidMtu
+        : payloadLength + _gattWriteOverhead;
+    _log('Payload length $payloadLength exceeds Android MTU payload limit $payloadLimit. Requesting MTU $requestedMtu.', notify: false);
+
+    try {
+      final int negotiatedMtu = await characteristic.device.requestMtu(requestedMtu);
+      payloadLimit = _payloadLimitForMtu(negotiatedMtu);
+      _log('Android MTU updated to $negotiatedMtu (payload limit $payloadLimit).', notify: false);
+    } catch (error) {
+      _log('Android MTU request failed: $error', notify: false);
+    }
+
+    if (payloadLength <= payloadLimit) {
+      return false;
+    }
+
+    if (useWithoutResponse) {
+      throw StateError('Write payload length $payloadLength exceeds Android MTU payload limit $payloadLimit for writeWithoutResponse.');
+    }
+
+    _log('Payload length $payloadLength still exceeds Android MTU payload limit $payloadLimit. Using long write.', notify: false);
+    return true;
+  }
+
+  int _payloadLimitForMtu(int mtu) {
+    if (mtu <= _gattWriteOverhead) {
+      return _defaultGattPayloadLimit;
+    }
+
+    return mtu - _gattWriteOverhead;
   }
 
   Future<void> _disconnectCurrentDevice() async {
-    _stopSystemTimeUpdates();
     _cancelSnapshotWatchdog();
     await _readValueSubscription?.cancel();
     _readValueSubscription = null;
@@ -1012,23 +1082,6 @@ class GuoranBleController extends ChangeNotifier {
     }
 
     return true;
-  }
-
-  void _startSystemTimeUpdates() {
-    _systemTimeTimer?.cancel();
-    _log('Started system time updates.', notify: false);
-    _systemTimeTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      unawaited(syncCurrentSystemTimeNow());
-    });
-    unawaited(syncCurrentSystemTimeNow());
-  }
-
-  void _stopSystemTimeUpdates() {
-    if (_systemTimeTimer != null) {
-      _log('Stopped system time updates.', notify: false);
-    }
-    _systemTimeTimer?.cancel();
-    _systemTimeTimer = null;
   }
 
   void _clearSession({required bool keepDevice, required bool keepStatus}) {

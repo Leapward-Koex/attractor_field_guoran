@@ -548,7 +548,7 @@ class _GuoranTimeSyncRoutePageState extends State<GuoranTimeSyncRoutePage> {
                     SwitchListTile.adaptive(
                       contentPadding: EdgeInsets.zero,
                       title: const Text('Use current time'),
-                      subtitle: const Text('When enabled, the device keeps following the phone time.'),
+                      subtitle: const Text('When enabled, Save sends the phone date and time once.'),
                       value: _useCurrentTime,
                       onChanged: widget.controller.isBusy || !enabled
                           ? null
@@ -570,7 +570,7 @@ class _GuoranTimeSyncRoutePageState extends State<GuoranTimeSyncRoutePage> {
                       alignment: Alignment.centerLeft,
                       child: Text(
                         _useCurrentTime
-                            ? 'Save will send the current date and time, then keep the clock in sync.'
+                            ? 'Save will send the current date and time once.'
                             : 'Save sends today\'s date with the selected manual time.',
                         style: Theme.of(context).textTheme.bodySmall?.copyWith(height: 1.35),
                       ),
@@ -611,11 +611,7 @@ class _GuoranTimeSyncRoutePageState extends State<GuoranTimeSyncRoutePage> {
       if (!mounted) {
         return;
       }
-      _showResultSnackBar(
-        context,
-        success: true,
-        message: _useCurrentTime ? 'Device time is now following the current time.' : 'Manual device time sent.',
-      );
+      _showResultSnackBar(context, success: true, message: _useCurrentTime ? 'Current phone time sent.' : 'Manual device time sent.');
     } catch (_) {
       if (!mounted) {
         return;
