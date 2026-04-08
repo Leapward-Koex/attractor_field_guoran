@@ -5,6 +5,8 @@ Attractor Field is a Flutter reimplementation of the BLE control app used by a f
 
 Example hardware:
 
+<img width="400" height="400" alt="image" src="https://github.com/user-attachments/assets/00d2f33b-c57e-40a6-a748-632e615e5d0a" />
+
 - https://www.aliexpress.com/item/1005003380622087.html
 - https://www.aliexpress.com/item/1005002651515235.html
 - https://web.archive.org/web/20220520005628/https://www.aliexpress.com/item/1005003380622087.html
